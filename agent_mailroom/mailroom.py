@@ -46,7 +46,17 @@ class AgentMailroom:
     ) -> str:
         """
         Helper method to register this agent's DID on-chain using the owner's private key.
+        Automatically stakes reputation if current stake is below 0.1 ETH.
         """
+        current_stake = self.registry.get_stake(self.agent_address)
+        min_stake = 100000000000000000 # 0.1 ETH
+        if current_stake < min_stake:
+            stake_needed = min_stake - current_stake
+            self.registry.stake_reputation(
+                owner_private_key=owner_private_key,
+                agent_address=self.agent_address,
+                amount_wei=stake_needed
+            )
         return self.registry.register_agent(
             owner_private_key=owner_private_key,
             agent_address=self.agent_address,
