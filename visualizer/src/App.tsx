@@ -31,6 +31,7 @@ interface StatePayload {
   time_offset: number
   logs: string[]
   is_running_swarm: boolean
+  simulated_vouchers?: Record<string, number>
 }
 
 function App() {
@@ -39,6 +40,52 @@ function App() {
   const [isTriggering, setIsTriggering] = useState(false)
   const terminalContainerRef = useRef<HTMLDivElement | null>(null)
   const prevLogsLengthRef = useRef<number>(0)
+
+  // Interactive playground states
+  const [activeTab, setActiveTab] = useState<'swarm' | 'playground'>('swarm')
+  const [playgroundAgent, setPlaygroundAgent] = useState<'alice' | 'broker' | 'developer' | 'auditor'>('developer')
+  const [playgroundAmount, setPlaygroundAmount] = useState<string>('0.1')
+  const [channelSender, setChannelSender] = useState<'alice' | 'broker'>('alice')
+  const [channelRecipient, setChannelRecipient] = useState<'broker' | 'developer' | 'auditor'>('broker')
+  const [channelAction, setChannelAction] = useState<string>('open-channel')
+  
+  const [interactiveLoading, setInteractiveLoading] = useState(false)
+  const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+
+  const handleInteractiveAction = async (endpoint: string, payload: any) => {
+    setInteractiveLoading(true)
+    setFeedbackMsg(null)
+    try {
+      const response = await fetch(`http://127.0.0.1:8545/api/interactive/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      const result = await response.json()
+      if (result.status === 'success') {
+        setFeedbackMsg({ type: 'success', text: `Action executed successfully!` })
+      } else {
+        setFeedbackMsg({ type: 'error', text: result.message || 'Action failed.' })
+      }
+    } catch (err: any) {
+      setFeedbackMsg({ type: 'error', text: err.message || 'Network error connecting to sandbox.' })
+    } finally {
+      setInteractiveLoading(false)
+    }
+  }
+
+  const handleResetSandbox = async () => {
+    setInteractiveLoading(true)
+    setFeedbackMsg(null)
+    try {
+      await fetch("http://127.0.0.1:8545/api/interactive/reset", { method: 'POST' })
+      setFeedbackMsg({ type: 'success', text: 'Sandbox node state reset to clean genesis.' })
+    } catch (err: any) {
+      setFeedbackMsg({ type: 'error', text: err.message || 'Reset failed.' })
+    } finally {
+      setInteractiveLoading(false)
+    }
+  }
 
   // Map agent addresses to coordinates, names and styles
   const layout: Record<string, { x: number; y: number; name: string; role: string; color: string }> = {
@@ -399,6 +446,23 @@ function App() {
                             <span style={{ color: 'var(--accent-green)' }}>SECURE State-Tunnel</span>
                           )}
                         </div>
+
+                        {data?.simulated_vouchers?.[cid] !== undefined && data.simulated_vouchers[cid] > 0 && (
+                          <div style={{
+                            marginTop: '8px',
+                            padding: '6px 10px',
+                            background: 'rgba(34, 211, 238, 0.08)',
+                            border: '1px dashed rgba(34, 211, 238, 0.2)',
+                            borderRadius: '6px',
+                            fontSize: '0.75rem',
+                            color: 'var(--accent-cyan)',
+                            display: 'flex',
+                            justifyContent: 'space-between'
+                          }}>
+                            <span>Pending Voucher (Off-chain):</span>
+                            <span style={{ fontWeight: 700 }}>{data.simulated_vouchers[cid].toFixed(4)} ETH</span>
+                          </div>
+                        )}
                       </div>
                     )
                   })
@@ -445,78 +509,220 @@ function App() {
             </div>
 
             {/* Swarm Controls */}
-            <div className="glass-card" style={{ padding: '24px', display: 'flex', flexDirection: 'column' }}>
+            <div className="glass-card" style={{ padding: '24px', display: 'flex', flexDirection: 'column', minHeight: '480px' }}>
               <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Economy Control Panel</h3>
               
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', flexGrow: 1 }}>
-                
-                {/* Trigger Swarm Button */}
-                <div>
-                  <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Swarm Automation</h4>
-                  <button 
-                    className="btn-cyber glow-purple-active" 
-                    onClick={handleTriggerSwarm}
-                    disabled={data?.is_running_swarm || isTriggering}
-                    style={{ width: '100%', justifyContent: 'center', height: '48px' }}
-                  >
-                    {data?.is_running_swarm ? 'Swarm Running...' : 'Trigger Swarm Execution'}
-                  </button>
-                </div>
+              {/* Tab Header */}
+              <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: '20px', paddingBottom: '10px', gap: '16px' }}>
+                <span 
+                  onClick={() => { setActiveTab('swarm'); setFeedbackMsg(null); }}
+                  style={{ fontSize: '0.9rem', fontWeight: 600, color: activeTab === 'swarm' ? 'var(--accent-purple)' : 'var(--text-dim)', cursor: 'pointer', borderBottom: activeTab === 'swarm' ? '2px solid var(--accent-purple)' : 'none', paddingBottom: '6px', transition: 'all 0.2s' }}
+                >
+                  Swarm Automation
+                </span>
+                <span 
+                  onClick={() => { setActiveTab('playground'); setFeedbackMsg(null); }}
+                  style={{ fontSize: '0.9rem', fontWeight: 600, color: activeTab === 'playground' ? 'var(--accent-purple)' : 'var(--text-dim)', cursor: 'pointer', borderBottom: activeTab === 'playground' ? '2px solid var(--accent-purple)' : 'none', paddingBottom: '6px', transition: 'all 0.2s' }}
+                >
+                  Sandbox Playground
+                </span>
+              </div>
 
-                {/* Time Travel Tool */}
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px' }}>
-                  <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>EVM Time Travel Simulation</h4>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '12px', lineHeight: 1.4 }}>
-                    Fast-forward block timestamp to force expire dispute challenge windows or standard challenge periods.
-                  </p>
-                  
-                  <div style={{ display: 'flex', gap: '10px' }}>
+              {activeTab === 'swarm' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', flexGrow: 1 }}>
+                  {/* Swarm Automation Section */}
+                  <div>
+                    <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>One-Click Run</h4>
+                    <button 
+                      className="btn-cyber glow-purple-active" 
+                      onClick={handleTriggerSwarm}
+                      disabled={data?.is_running_swarm || isTriggering}
+                      style={{ width: '100%', justifyContent: 'center', height: '48px' }}
+                    >
+                      {data?.is_running_swarm ? 'Swarm Running...' : 'Trigger Swarm Execution'}
+                    </button>
+                  </div>
+
+                  {/* Time Travel Tool */}
+                  <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px' }}>
+                    <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>EVM Time Travel Simulation</h4>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '12px', lineHeight: 1.4 }}>
+                      Fast-forward block timestamp to force expire dispute challenge windows or standard challenge periods.
+                    </p>
+                    
+                    <div style={{ display: 'flex', gap: '10px' }}>
+                      <button 
+                        onClick={() => handleTimeTravel(1)}
+                        style={{
+                          flex: 1,
+                          background: '#1c1e2a',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          color: '#fff',
+                          padding: '10px',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          fontSize: '0.8rem'
+                        }}
+                      >
+                        + 1 Hour
+                      </button>
+                      <button 
+                        onClick={() => handleTimeTravel(24)}
+                        style={{
+                          flex: 1,
+                          background: '#1c1e2a',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          color: '#fff',
+                          padding: '10px',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          fontSize: '0.8rem'
+                        }}
+                      >
+                        + 24 Hours
+                      </button>
+                    </div>
+                    
+                    <div style={{ fontSize: '0.75rem', marginTop: '12px', color: 'var(--text-dim)', textAlign: 'center' }}>
+                      Current Time Offset: {data ? `${(data.time_offset / 3600).toFixed(1)} hours` : '0h'}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', flexGrow: 1 }}>
+                  {/* Feedback Message */}
+                  {feedbackMsg && (
+                    <div style={{
+                      padding: '10px 14px',
+                      borderRadius: '6px',
+                      fontSize: '0.8rem',
+                      background: feedbackMsg.type === 'success' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                      border: feedbackMsg.type === 'success' ? '1px solid rgba(34, 197, 94, 0.2)' : '1px solid rgba(239, 68, 68, 0.2)',
+                      color: feedbackMsg.type === 'success' ? 'var(--accent-green)' : 'var(--accent-red)',
+                      fontWeight: 600,
+                    }}>
+                      {feedbackMsg.text}
+                    </div>
+                  )}
+
+                  {/* Staking Panel */}
+                  <div style={{ border: '1px solid rgba(255,255,255,0.05)', padding: '14px', borderRadius: '8px', background: 'rgba(0,0,0,0.1)' }}>
+                    <h4 style={{ fontSize: '0.85rem', color: '#fff', marginBottom: '10px', fontWeight: 600 }}>1. Reputation Staking</h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ display: 'flex', gap: '10px' }}>
+                        <select 
+                          value={playgroundAgent} 
+                          onChange={(e) => setPlaygroundAgent(e.target.value as any)}
+                          style={{ flex: 1, background: '#141621', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '4px', fontSize: '0.8rem' }}
+                        >
+                          <option value="alice">Alice (Buyer)</option>
+                          <option value="broker">Broker Agent</option>
+                          <option value="developer">Developer Agent</option>
+                          <option value="auditor">Auditor Agent</option>
+                        </select>
+                        
+                        <input 
+                          type="number" 
+                          value={playgroundAmount} 
+                          onChange={(e) => setPlaygroundAmount(e.target.value)}
+                          placeholder="Amount in ETH"
+                          style={{ width: '80px', background: '#141621', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '4px', fontSize: '0.8rem' }}
+                        />
+                      </div>
+                      
+                      <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                        <button 
+                          disabled={interactiveLoading}
+                          onClick={() => handleInteractiveAction('stake', { agent: playgroundAgent, amount: playgroundAmount })}
+                          style={{ flex: 1, padding: '8px', borderRadius: '4px', border: 'none', background: 'var(--accent-purple)', color: '#fff', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
+                        >
+                          Stake
+                        </button>
+                        <button 
+                          disabled={interactiveLoading}
+                          onClick={() => handleInteractiveAction('unstake', { agent: playgroundAgent })}
+                          style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.1)', background: '#1c1e2a', color: '#fff', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
+                        >
+                          Unstake
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Channel Action Panel */}
+                  <div style={{ border: '1px solid rgba(255,255,255,0.05)', padding: '14px', borderRadius: '8px', background: 'rgba(0,0,0,0.1)' }}>
+                    <h4 style={{ fontSize: '0.85rem', color: '#fff', marginBottom: '10px', fontWeight: 600 }}>2. State-Channel Controller</h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <select 
+                          value={channelSender} 
+                          onChange={(e) => setChannelSender(e.target.value as any)}
+                          style={{ flex: 1, background: '#141621', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '4px', fontSize: '0.8rem' }}
+                        >
+                          <option value="alice">Alice</option>
+                          <option value="broker">Broker</option>
+                        </select>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>➔</span>
+                        <select 
+                          value={channelRecipient} 
+                          onChange={(e) => setChannelRecipient(e.target.value as any)}
+                          style={{ flex: 1, background: '#141621', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '4px', fontSize: '0.8rem' }}
+                        >
+                          <option value="broker">Broker</option>
+                          <option value="developer">Developer</option>
+                          <option value="auditor">Auditor</option>
+                        </select>
+                      </div>
+
+                      <select 
+                        value={channelAction} 
+                        onChange={(e) => setChannelAction(e.target.value)}
+                        style={{ width: '100%', background: '#141621', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '8px', borderRadius: '4px', fontSize: '0.8rem' }}
+                      >
+                        <option value="open-channel">Open State-Channel (0.05 ETH)</option>
+                        <option value="send-voucher">Sign Off-chain Voucher (+0.01 ETH)</option>
+                        <option value="redeem-voucher">Redeem Voucher On-chain (Settle)</option>
+                        <option value="dispute">Initiate Dispute (Freeze Escrow)</option>
+                        <option value="slash">Claim Slash (Slash Stake by 0.05 ETH)</option>
+                        <option value="challenge">Initiate Challenge (Refund period)</option>
+                        <option value="refund">Claim Refund (Reclaim deposit)</option>
+                      </select>
+
+                      <button 
+                        disabled={interactiveLoading}
+                        onClick={() => handleInteractiveAction(channelAction, { sender: channelSender, recipient: channelRecipient, amount: 0.01 })}
+                        style={{ width: '100%', padding: '10px', borderRadius: '4px', border: 'none', background: 'var(--accent-cyan)', color: '#000', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', marginTop: '4px' }}
+                      >
+                        {interactiveLoading ? 'Processing...' : 'Execute Channel Action'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Reset Panel */}
+                  <div style={{ display: 'flex', gap: '10px', marginTop: 'auto' }}>
+                    <button 
+                      disabled={interactiveLoading}
+                      onClick={handleResetSandbox}
+                      style={{ flex: 1, padding: '10px', borderRadius: '6px', border: '1px solid rgba(239, 68, 68, 0.3)', background: 'rgba(239, 68, 68, 0.08)', color: 'var(--accent-red)', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}
+                    >
+                      Reset Simulator
+                    </button>
                     <button 
                       onClick={() => handleTimeTravel(1)}
-                      style={{
-                        flex: 1,
-                        background: '#1c1e2a',
-                        border: '1px solid rgba(255,255,255,0.08)',
-                        color: '#fff',
-                        padding: '10px',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        fontWeight: 600,
-                        fontSize: '0.8rem'
-                      }}
+                      style={{ width: '90px', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.08)', background: '#1c1e2a', color: '#fff', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}
                     >
                       + 1 Hour
                     </button>
-                    <button 
-                      onClick={() => handleTimeTravel(24)}
-                      style={{
-                        flex: 1,
-                        background: '#1c1e2a',
-                        border: '1px solid rgba(255,255,255,0.08)',
-                        color: '#fff',
-                        padding: '10px',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        fontWeight: 600,
-                        fontSize: '0.8rem'
-                      }}
-                    >
-                      + 24 Hours
-                    </button>
-                  </div>
-                  
-                  <div style={{ fontSize: '0.75rem', marginTop: '12px', color: 'var(--text-dim)', textAlign: 'center' }}>
-                    Current Time Offset: {data ? `${(data.time_offset / 3600).toFixed(1)} hours` : '0h'}
                   </div>
                 </div>
+              )}
 
-              </div>
             </div>
-
           </div>
         </>
       )}
-
     </div>
   )
 }

@@ -46,6 +46,9 @@ class SandboxState:
     # Execution logs for UI visualizer
     logs: list[str] = []
     is_running_swarm: bool = False
+    
+    # channel_id (hex str) -> signed voucher amount (int)
+    simulated_vouchers: Dict[str, int] = {}
 
 
 class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
@@ -53,6 +56,20 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         # Override to suppress standard HTTP logging and keep console output clean
         pass
+
+    def _send_api_json(self, data: Any) -> None:
+        response_bytes = json.dumps(data).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Content-Length', str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
+
+    def _send_api_error(self, message: str) -> None:
+        self._send_api_json({"status": "error", "message": message})
 
     def do_POST(self) -> None:
         """Handles POST requests carrying JSON-RPC commands from Web3.py."""
@@ -70,6 +87,290 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(response_bytes)
             return
+
+        elif self.path.startswith("/api/interactive/"):
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            params = json.loads(post_data.decode('utf-8')) if content_length > 0 else {}
+            
+            w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
+            from agent_mailroom.registry import AgentRegistryClient
+            from agent_mailroom.channel import PaymentChannelManager
+            
+            registry_client = AgentRegistryClient(w3)
+            channel_manager = PaymentChannelManager(w3)
+            
+            action = self.path.replace("/api/interactive/", "")
+            
+            try:
+                if action == "reset":
+                    SandboxState.registry = {}
+                    SandboxState.channels = {}
+                    SandboxState.nonces = {}
+                    SandboxState.receipts = {}
+                    SandboxState.stakes = {}
+                    SandboxState.disputes = {}
+                    SandboxState.time_offset = 0
+                    SandboxState.logs = ["[00:00:00] Sandbox node state reset to clean genesis."]
+                    SandboxState.simulated_vouchers = {}
+                    SandboxState.is_running_swarm = False
+                    
+                    global agent_servers_started
+                    agent_servers_started = False
+                    
+                    self._send_api_json({"status": "success"})
+                    return
+                    
+                elif action == "stake":
+                    agent = params.get("agent")
+                    amount_eth = float(params.get("amount", 0.1))
+                    amount_wei = w3.to_wei(amount_eth, "ether")
+                    
+                    keys = AGENT_KEYS.get(agent)
+                    if not keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    agent_address = Account.from_key(keys["agent"]).address
+                    tx_hash = registry_client.stake_reputation(
+                        owner_private_key=keys["owner"],
+                        agent_address=agent_address,
+                        amount_wei=amount_wei
+                    )
+                    
+                    log_msg = f"Staked {amount_eth} ETH for {agent.capitalize()} Agent reputation on-chain."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "unstake":
+                    agent = params.get("agent")
+                    keys = AGENT_KEYS.get(agent)
+                    if not keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    agent_address = Account.from_key(keys["agent"]).address
+                    tx_hash = registry_client.unstake_reputation(
+                        owner_private_key=keys["owner"],
+                        agent_address=agent_address
+                    )
+                    
+                    log_msg = f"Reclaimed (unstaked) reputation collateral for {agent.capitalize()} Agent on-chain."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "register":
+                    agent = params.get("agent")
+                    rate_eth = float(params.get("rate", 0))
+                    rate_wei = w3.to_wei(rate_eth, "ether")
+                    capabilities = params.get("capabilities", ["task"])
+                    endpoint = params.get("endpoint", f"http://127.0.0.1:8000")
+                    
+                    keys = AGENT_KEYS.get(agent)
+                    if not keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    agent_address = Account.from_key(keys["agent"]).address
+                    tx_hash = registry_client.register_agent(
+                        owner_private_key=keys["owner"],
+                        agent_address=agent_address,
+                        endpoint=endpoint,
+                        capabilities=capabilities,
+                        rate_wei=rate_wei
+                    )
+                    
+                    log_msg = f"Registered {agent.capitalize()} Agent Profile (Rate: {rate_eth} ETH, Caps: {capabilities})."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "open-channel":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    amount_eth = float(params.get("amount", 0.05))
+                    amount_wei = w3.to_wei(amount_eth, "ether")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    tx_hash = channel_manager.open_channel(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address,
+                        amount_wei=amount_wei
+                    )
+                    
+                    log_msg = f"Opened Payment Channel: {sender.capitalize()} ➔ {recipient.capitalize()} with {amount_eth} ETH."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "send-voucher":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    amount_eth = float(params.get("amount", 0.01))
+                    amount_wei = w3.to_wei(amount_eth, "ether")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    sender_address = Account.from_key(sender_keys["agent"]).address
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    channel_id = Web3.solidity_keccak(["address", "address"], [sender_address, recipient_address]).hex()
+                    
+                    if channel_id not in SandboxState.channels:
+                        self._send_api_error("Channel is not open.")
+                        return
+                        
+                    # Sign & verify
+                    voucher = channel_manager.create_voucher(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address,
+                        amount_wei=amount_wei
+                    )
+                    SandboxState.simulated_vouchers[channel_id] = amount_wei
+                    
+                    log_msg = f"Signed Voucher (Off-chain): {sender.capitalize()} ➔ {recipient.capitalize()} for {amount_eth} ETH (Cumulative)."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success"})
+                    return
+
+                elif action == "redeem-voucher":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    sender_address = Account.from_key(sender_keys["agent"]).address
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    channel_id = Web3.solidity_keccak(["address", "address"], [sender_address, recipient_address]).hex()
+                    
+                    amount_wei = SandboxState.simulated_vouchers.get(channel_id, 0)
+                    if amount_wei == 0:
+                        self._send_api_error("No off-chain vouchers found to redeem.")
+                        return
+                        
+                    voucher = channel_manager.create_voucher(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address,
+                        amount_wei=amount_wei
+                    )
+                    tx_hash = channel_manager.redeem_voucher_on_chain(
+                        recipient_private_key=recipient_keys["agent"],
+                        sender_address=sender_address,
+                        voucher=voucher
+                    )
+                    SandboxState.simulated_vouchers[channel_id] = 0
+                    
+                    log_msg = f"Redeemed Voucher on-chain: Settled payment {amount_wei/1e18} ETH from {sender.capitalize()} ➔ {recipient.capitalize()}."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "dispute":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    task_hash = hashlib.sha256(b"playground-dispute-hash").digest()
+                    tx_hash = channel_manager.initiate_dispute(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address,
+                        task_hash=task_hash
+                    )
+                    
+                    log_msg = f"Dispute Opened: {sender.capitalize()} disputes {recipient.capitalize()}'s delivery! Channel frozen."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "slash":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    tx_hash = channel_manager.claim_dispute_slash(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address
+                    )
+                    
+                    log_msg = f"Dispute Slash executed: Slashed {recipient.capitalize()}'s reputation stake. compensated {sender.capitalize()}."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "challenge":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    tx_hash = channel_manager.initiate_challenge(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address
+                    )
+                    
+                    log_msg = f"Initiated channel refund challenge for {sender.capitalize()} ➔ {recipient.capitalize()}."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+
+                elif action == "refund":
+                    sender = params.get("sender")
+                    recipient = params.get("recipient")
+                    
+                    sender_keys = AGENT_KEYS.get(sender)
+                    recipient_keys = AGENT_KEYS.get(recipient)
+                    if not sender_keys or not recipient_keys:
+                        self._send_api_error("Unknown agent")
+                        return
+                        
+                    recipient_address = Account.from_key(recipient_keys["agent"]).address
+                    tx_hash = channel_manager.claim_refund(
+                        sender_private_key=sender_keys["agent"],
+                        recipient_address=recipient_address
+                    )
+                    
+                    log_msg = f"Closed channel and claimed remaining deposit refund for {sender.capitalize()} ➔ {recipient.capitalize()}."
+                    SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {log_msg}")
+                    self._send_api_json({"status": "success", "tx_hash": tx_hash})
+                    return
+                else:
+                    self._send_api_error("Invalid interactive action")
+                    return
+            except Exception as e:
+                self._send_api_error(f"EVM Reverted: {str(e)}")
+                return
 
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
@@ -127,13 +428,18 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                     }
                 }
             
+            vouchers_serialized = {}
+            for cid, amt in SandboxState.simulated_vouchers.items():
+                vouchers_serialized[cid] = amt / 1e18
+
             state_payload = {
                 "registry": reg_data,
                 "channels": chan_data,
                 "stakes": SandboxState.stakes,
                 "time_offset": SandboxState.time_offset,
                 "logs": SandboxState.logs,
-                "is_running_swarm": SandboxState.is_running_swarm
+                "is_running_swarm": SandboxState.is_running_swarm,
+                "simulated_vouchers": vouchers_serialized
             }
             
             response_bytes = json.dumps(state_payload).encode('utf-8')
@@ -696,6 +1002,25 @@ agent_servers_started = False
 servers_dict = {}
 apps_dict = {}
 
+AGENT_KEYS = {
+    "alice": {
+        "owner": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "agent": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690c"
+    },
+    "broker": {
+        "owner": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+        "agent": "0xabf82f5110266c165e6488bc1103c80ff2570891d4e0e5a8e64e10b42f61a789"
+    },
+    "developer": {
+        "owner": "0x47e1754f7b1d9c2f82195000575d30a8a37c093a1cf552a4e2ef30f81d11a234",
+        "agent": "0x70c72b1a8cd26b840134a6210f0322bf25852891d4e0e5a8e64e10b42f61a789"
+    },
+    "auditor": {
+        "owner": "0x8b3a74bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "agent": "0x80c72b1a8cd26b840134a6210f0322bf25852891d4e0e5a8e64e10b42f61a456"
+    }
+}
+
 def execute_swarm_in_background():
     global agent_servers_started, apps_dict
     if SandboxState.is_running_swarm:
@@ -712,14 +1037,14 @@ def execute_swarm_in_background():
         w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
         
         # Keys
-        ALICE_OWNER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-        ALICE_AGENT_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690c"
-        BROKER_OWNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-        BROKER_AGENT_KEY = "0xabf82f5110266c165e6488bc1103c80ff2570891d4e0e5a8e64e10b42f61a789"
-        DEV_OWNER_KEY = "0x47e1754f7b1d9c2f82195000575d30a8a37c093a1cf552a4e2ef30f81d11a234"
-        DEV_AGENT_KEY = "0x70c72b1a8cd26b840134a6210f0322bf25852891d4e0e5a8e64e10b42f61a789"
-        AUDITOR_OWNER_KEY = "0x8b3a74bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-        AUDITOR_AGENT_KEY = "0x80c72b1a8cd26b840134a6210f0322bf25852891d4e0e5a8e64e10b42f61a456"
+        ALICE_OWNER_KEY = AGENT_KEYS["alice"]["owner"]
+        ALICE_AGENT_KEY = AGENT_KEYS["alice"]["agent"]
+        BROKER_OWNER_KEY = AGENT_KEYS["broker"]["owner"]
+        BROKER_AGENT_KEY = AGENT_KEYS["broker"]["agent"]
+        DEV_OWNER_KEY = AGENT_KEYS["developer"]["owner"]
+        DEV_AGENT_KEY = AGENT_KEYS["developer"]["agent"]
+        AUDITOR_OWNER_KEY = AGENT_KEYS["auditor"]["owner"]
+        AUDITOR_AGENT_KEY = AGENT_KEYS["auditor"]["agent"]
 
         from agent_mailroom.mailroom import AgentMailroom
         from agent_mailroom.server import create_agent_app
