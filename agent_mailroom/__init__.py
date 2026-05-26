@@ -16,6 +16,10 @@ from .auth import (
     AgentRequestEnvelope,
     AgentAuth,
     build_request_eip712_struct,
+    TaskSpec,
+    AgentQuoteEnvelope,
+    sign_quote,
+    verify_quote,
 )
 from .channel import (
     PaymentVoucher,
@@ -33,6 +37,10 @@ __all__ = [
     "AgentRequestEnvelope",
     "AgentAuth",
     "build_request_eip712_struct",
+    "TaskSpec",
+    "AgentQuoteEnvelope",
+    "sign_quote",
+    "verify_quote",
     "PaymentVoucher",
     "PaymentChannelManager",
     "DEFAULT_CHANNEL_ADDRESS",
