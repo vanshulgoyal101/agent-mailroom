@@ -694,9 +694,10 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
 # Globally track if servers are running
 agent_servers_started = False
 servers_dict = {}
+apps_dict = {}
 
 def execute_swarm_in_background():
-    global agent_servers_started
+    global agent_servers_started, apps_dict
     if SandboxState.is_running_swarm:
         return
     
@@ -755,6 +756,7 @@ def execute_swarm_in_background():
                 code = params.get("code", "")
                 return {"code": f"// Developer Refactored Code\nfunction optimized() {{\n  // Done\n}}\n{code}"}
             dev_app = create_agent_app(dev_mailroom, dev_task_handler)
+            apps_dict["dev"] = dev_app
             dev_config = uvicorn.Config(dev_app, host="127.0.0.1", port=8003, log_level="warning")
             servers_dict["dev"] = uvicorn.Server(dev_config)
             threading.Thread(target=servers_dict["dev"].run, daemon=True).start()
@@ -764,6 +766,7 @@ def execute_swarm_in_background():
                 code = params.get("code", "")
                 return {"report": f"Security Scan Report:\n- Buffer Overflows: None\n- Re-entrancy check: Safe\n- Lines Scanned: {len(code.splitlines())}"}
             auditor_app = create_agent_app(auditor_mailroom, auditor_task_handler)
+            apps_dict["auditor"] = auditor_app
             auditor_config = uvicorn.Config(auditor_app, host="127.0.0.1", port=8002, log_level="warning")
             servers_dict["auditor"] = uvicorn.Server(auditor_config)
             threading.Thread(target=servers_dict["auditor"].run, daemon=True).start()
@@ -779,6 +782,7 @@ def execute_swarm_in_background():
                 brokerage_fee_wei=w3.to_wei(0.005, "ether")
             )
             broker_app = broker_agent.create_app()
+            apps_dict["broker"] = broker_app
             broker_config = uvicorn.Config(broker_app, host="127.0.0.1", port=8004, log_level="warning")
             servers_dict["broker"] = uvicorn.Server(broker_config)
             threading.Thread(target=servers_dict["broker"].run, daemon=True).start()
@@ -811,6 +815,9 @@ def execute_swarm_in_background():
         log("Auditor scan report generated successfully.")
         
         log("Executing dynamic on-chain settlements...")
+        dev_app = apps_dict["dev"]
+        auditor_app = apps_dict["auditor"]
+        broker_app = apps_dict["broker"]
         # Settle Dev
         dev_voucher = dev_app.state.verified_vouchers.get(broker_mailroom.agent_address.lower())
         if dev_voucher:
