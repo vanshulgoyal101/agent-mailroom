@@ -53,6 +53,45 @@ REGISTRY_ABI = [
         ],
         "stateMutability": "view",
         "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
+        "name": "stakeReputation",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
+        "name": "unstakeReputation",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "_paymentChannel", "type": "address"}],
+        "name": "setPaymentChannel",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "agent", "type": "address"},
+            {"internalType": "address", "name": "recipient", "type": "address"},
+            {"internalType": "uint256", "name": "amount", "type": "uint256"}
+        ],
+        "name": "slashAgent",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "stakes",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
     }
 ]
 
@@ -231,3 +270,77 @@ class AgentRegistryClient:
         signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=owner_private_key)
         tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
         return "0x" + tx_hash.hex()
+
+    def stake_reputation(self, owner_private_key: str, agent_address: str, amount_wei: int) -> str:
+        """
+        Stakes reputation for an agent address by locking up ETH.
+        """
+        account = self.w3.eth.account.from_key(owner_private_key)
+        agent_checksum = Web3.to_checksum_address(agent_address)
+
+        nonce = self.w3.eth.get_transaction_count(account.address)
+        tx = self.contract.functions.stakeReputation(
+            agent_checksum
+        ).build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "value": amount_wei,
+            "gas": 150000,
+            "gasPrice": self.w3.eth.gas_price,
+            "chainId": self.w3.eth.chain_id
+        })
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=owner_private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return "0x" + tx_hash.hex()
+
+    def unstake_reputation(self, owner_private_key: str, agent_address: str) -> str:
+        """
+        Unstakes locked reputation for a deactivated agent address.
+        """
+        account = self.w3.eth.account.from_key(owner_private_key)
+        agent_checksum = Web3.to_checksum_address(agent_address)
+
+        nonce = self.w3.eth.get_transaction_count(account.address)
+        tx = self.contract.functions.unstakeReputation(
+            agent_checksum
+        ).build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": 150000,
+            "gasPrice": self.w3.eth.gas_price,
+            "chainId": self.w3.eth.chain_id
+        })
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=owner_private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return "0x" + tx_hash.hex()
+
+    def set_payment_channel(self, admin_private_key: str, payment_channel_address: str) -> str:
+        """
+        Sets the authorized payment channel address in the registry (admin function).
+        """
+        account = self.w3.eth.account.from_key(admin_private_key)
+        channel_checksum = Web3.to_checksum_address(payment_channel_address)
+
+        nonce = self.w3.eth.get_transaction_count(account.address)
+        tx = self.contract.functions.setPaymentChannel(
+            channel_checksum
+        ).build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": 100000,
+            "gasPrice": self.w3.eth.gas_price,
+            "chainId": self.w3.eth.chain_id
+        })
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=admin_private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return "0x" + tx_hash.hex()
+
+    def get_stake(self, agent_address: str) -> int:
+        """
+        Queries the locked reputation stake of an agent in Wei.
+        """
+        agent_checksum = Web3.to_checksum_address(agent_address)
+        return self.contract.functions.stakes(agent_checksum).call()

@@ -31,6 +31,18 @@ class SandboxState:
     # transaction receipts: tx_hash -> receipt dict
     receipts: Dict[str, Dict[str, Any]] = {}
 
+    # agent_address (lowercase str) -> stake amount (int)
+    stakes: Dict[str, int] = {}
+
+    # channel_id (hex str) -> dict with keys: taskHash (bytes), expiry (int), active (bool)
+    disputes: Dict[str, Dict[str, Any]] = {}
+
+    # Authorized payment channel address
+    payment_channel: str = ""
+
+    # Time offset in seconds (for evm_increaseTime / evm_mine)
+    time_offset: int = 0
+
 
 class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
 
@@ -57,9 +69,72 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
         response_bytes = json.dumps(response).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Content-Length', str(len(response_bytes)))
         self.end_headers()
         self.wfile.write(response_bytes)
+
+    def do_GET(self) -> None:
+        """Handles GET requests, specifically /api/state for the React UI visualizer."""
+        if self.path == "/api/state":
+            reg_data = {}
+            for addr, val in SandboxState.registry.items():
+                reg_data[addr] = {
+                    "owner": val["owner"],
+                    "endpoint": val["endpoint"],
+                    "modelCapabilities": val["modelCapabilities"],
+                    "ratePerTaskWei": val["ratePerTaskWei"],
+                    "active": val["active"],
+                    "stake": SandboxState.stakes.get(addr, 0)
+                }
+            
+            chan_data = {}
+            for cid, val in SandboxState.channels.items():
+                disp = SandboxState.disputes.get(cid, {"taskHash": b"", "expiry": 0, "active": False})
+                th_hex = "0x" + disp["taskHash"].hex() if isinstance(disp["taskHash"], bytes) else ""
+                
+                chan_data[cid] = {
+                    "sender": val.get("sender", "unknown"),
+                    "recipient": val.get("recipient", "unknown"),
+                    "deposit": val["deposit"],
+                    "challengeExpiry": val["challengeExpiry"],
+                    "challenged": val["challenged"],
+                    "dispute": {
+                        "taskHash": th_hex,
+                        "expiry": disp["expiry"],
+                        "active": disp["active"]
+                    }
+                }
+            
+            state_payload = {
+                "registry": reg_data,
+                "channels": chan_data,
+                "stakes": SandboxState.stakes,
+                "time_offset": SandboxState.time_offset
+            }
+            
+            response_bytes = json.dumps(state_payload).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Headers', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+            self.send_header('Content-Length', str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_OPTIONS(self) -> None:
+        """Handles CORS preflight requests."""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.end_headers()
 
     def send_error_response(self, code: int, message: str, req_id: Any) -> None:
         error_response = {
@@ -73,6 +148,9 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
         response_bytes = json.dumps(error_response).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Content-Length', str(len(response_bytes)))
         self.end_headers()
         self.wfile.write(response_bytes)
@@ -94,7 +172,7 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
             result = True
             
         elif method == "eth_blockNumber":
-            result = "0x" + hex(int(time.time()))[2:]  # Pseudo incrementing blocks based on time
+            result = "0x" + hex(int(time.time()) + SandboxState.time_offset)[2:]  # Pseudo incrementing blocks based on time
             
         elif method == "eth_gasPrice":
             result = "0x4a817c800"  # 20 Gwei
@@ -135,6 +213,14 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
             
         elif method == "web3_clientVersion":
             result = "SandboxNode/v1.0.0"
+
+        elif method == "evm_increaseTime":
+            seconds = params[0]
+            SandboxState.time_offset += seconds
+            result = SandboxState.time_offset
+
+        elif method == "evm_mine":
+            result = "0x0"
             
         else:
             result = "0x0"
@@ -202,6 +288,11 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                     print(f"  Endpoint:   {func_args['endpoint']}")
                     print(f"  Rate:       {func_args['ratePerTaskWei']} Wei")
                     
+                    min_stake = 100000000000000000 # 0.1 ETH
+                    if SandboxState.stakes.get(agent_addr, 0) < min_stake:
+                        print("  [ERROR] Insufficient reputation stake! Minimum 0.1 ETH required.")
+                        return False
+                    
                     SandboxState.registry[agent_addr] = {
                         "owner": sender,
                         "endpoint": func_args["endpoint"],
@@ -241,6 +332,59 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                         return True
                     return False
 
+                elif func_obj.fn_name == "stakeReputation":
+                    print(f"\n[SANDBOX NODE] Tx Mined: stakeReputation")
+                    print(f"  Agent DID:  did:agent:eth:{func_args['agent']}")
+                    print(f"  Staker:     {sender}")
+                    print(f"  Value:      {value} Wei ({value / 1e18} ETH)")
+                    SandboxState.stakes[agent_addr] = SandboxState.stakes.get(agent_addr, 0) + value
+                    return True
+
+                elif func_obj.fn_name == "unstakeReputation":
+                    print(f"\n[SANDBOX NODE] Tx Mined: unstakeReputation")
+                    print(f"  Agent DID:  did:agent:eth:{func_args['agent']}")
+                    
+                    staked_amount = SandboxState.stakes.get(agent_addr, 0)
+                    if staked_amount == 0:
+                        print("  [ERROR] No stake found to unstake!")
+                        return False
+                    
+                    if agent_addr in SandboxState.registry and SandboxState.registry[agent_addr]["active"]:
+                        print("  [ERROR] Must deregister agent profile before unstaking!")
+                        return False
+                    
+                    SandboxState.stakes[agent_addr] = 0
+                    print(f"  [SUCCESS] Unstaked {staked_amount} Wei ({staked_amount / 1e18} ETH) to owner/caller.")
+                    return True
+
+                elif func_obj.fn_name == "setPaymentChannel":
+                    payment_channel = func_args["_paymentChannel"].lower()
+                    SandboxState.payment_channel = payment_channel
+                    print(f"\n[SANDBOX NODE] Tx Mined: setPaymentChannel")
+                    print(f"  Channel Contract: {payment_channel}")
+                    return True
+
+                elif func_obj.fn_name == "slashAgent":
+                    print(f"\n[SANDBOX NODE] Tx Mined: slashAgent")
+                    print(f"  Agent DID:  did:agent:eth:{func_args['agent']}")
+                    print(f"  Recipient:  {func_args['recipient']}")
+                    print(f"  Amount:     {func_args['amount']} Wei")
+                    
+                    # Verify caller is authorized payment channel (if set)
+                    if sender_lower != SandboxState.payment_channel.lower() and SandboxState.payment_channel != "":
+                        print(f"  [ERROR] Caller {sender} is not authorized payment channel {SandboxState.payment_channel}!")
+                        return False
+                        
+                    agent_addr = func_args["agent"].lower()
+                    amount = func_args["amount"]
+                    if SandboxState.stakes.get(agent_addr, 0) < amount:
+                        print("  [ERROR] Slash amount exceeds locked stake!")
+                        return False
+                        
+                    SandboxState.stakes[agent_addr] -= amount
+                    print(f"  [SUCCESS] Slashed {amount} Wei from agent {agent_addr}.")
+                    return True
+
             # Payment Channel Contract interaction
             elif to.lower() == DEFAULT_CHANNEL_ADDRESS.lower():
                 contract = w3.eth.contract(address=DEFAULT_CHANNEL_ADDRESS, abi=CHANNEL_ABI)
@@ -259,6 +403,8 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                     print(f"  ChannelID: {channel_id}")
 
                     channel = SandboxState.channels.get(channel_id, {
+                        "sender": sender,
+                        "recipient": recipient,
                         "deposit": 0,
                         "challengeExpiry": 0,
                         "challenged": False
@@ -293,6 +439,12 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                         print("  [ERROR] Voucher amount exceeds locked deposit!")
                         return False
 
+                    # Check for active dispute
+                    dispute = SandboxState.disputes.get(channel_id)
+                    if dispute and dispute["active"]:
+                        print("  [ERROR] Cannot settle channel: Active dispute exists!")
+                        return False
+
                     # Delete channel (Standard closed state)
                     del SandboxState.channels[channel_id]
                     print(f"  [SUCCESS] Channel settled! Payout {amount} Wei, Refunded remainder.")
@@ -310,7 +462,7 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                     channel = SandboxState.channels.get(channel_id)
                     if channel:
                         channel["challenged"] = True
-                        channel["challengeExpiry"] = int(time.time()) + 3600  # 1 hour expiry
+                        channel["challengeExpiry"] = int(time.time()) + SandboxState.time_offset + 3600  # 1 hour expiry
                         return True
                     return False
 
@@ -324,12 +476,103 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                     print(f"  ChannelID: {channel_id}")
 
                     channel = SandboxState.channels.get(channel_id)
-                    if channel and channel["challenged"] and int(time.time()) >= channel["challengeExpiry"]:
+                    current_time = int(time.time()) + SandboxState.time_offset
+                    if channel and channel["challenged"] and current_time >= channel["challengeExpiry"]:
                         del SandboxState.channels[channel_id]
                         print("  [SUCCESS] Refund claimed! Funds returned to sender.")
                         return True
-                    print("  [ERROR] Challenge not expired or not challenged!")
+                    print(f"  [ERROR] Challenge not expired (expiry {channel.get('challengeExpiry') if channel else 0}, current {current_time}) or not challenged!")
                     return False
+
+                elif func_obj.fn_name == "initiateDispute":
+                    recipient = func_args["recipient"]
+                    task_hash = func_args["taskHash"]
+                    channel_id = Web3.solidity_keccak(["address", "address"], [sender, recipient]).hex()
+
+                    print(f"\n[SANDBOX NODE] Tx Mined: initiateDispute")
+                    print(f"  Sender:    {sender}")
+                    print(f"  Recipient: {recipient}")
+                    print(f"  Task Hash: 0x{task_hash.hex()}")
+                    print(f"  ChannelID: {channel_id}")
+
+                    channel = SandboxState.channels.get(channel_id)
+                    if not channel:
+                        print("  [ERROR] Channel does not exist to dispute!")
+                        return False
+
+                    dispute = SandboxState.disputes.get(channel_id)
+                    if dispute and dispute["active"]:
+                        print("  [ERROR] Dispute already active!")
+                        return False
+
+                    SandboxState.disputes[channel_id] = {
+                        "taskHash": task_hash,
+                        "expiry": int(time.time()) + SandboxState.time_offset + 3600,  # 1 hour
+                        "active": True
+                    }
+                    return True
+
+                elif func_obj.fn_name == "resolveDispute":
+                    chan_sender = func_args["sender"]
+                    task_hash = func_args["taskHash"]
+                    signature = func_args["signature"].hex()
+                    
+                    # msg.sender is the recipient (sender of this resolveDispute tx)
+                    recipient = sender
+                    channel_id = Web3.solidity_keccak(["address", "address"], [chan_sender, recipient]).hex()
+
+                    print(f"\n[SANDBOX NODE] Tx Mined: resolveDispute")
+                    print(f"  Sender:    {chan_sender}")
+                    print(f"  Recipient: {recipient}")
+                    print(f"  Task Hash: 0x{task_hash.hex()}")
+
+                    dispute = SandboxState.disputes.get(channel_id)
+                    if not dispute or not dispute["active"]:
+                        print("  [ERROR] No active dispute found to resolve!")
+                        return False
+
+                    if dispute["taskHash"] != task_hash:
+                        print("  [ERROR] Dispute task hash mismatch!")
+                        return False
+
+                    dispute["active"] = False
+                    print(f"  [SUCCESS] Dispute resolved by recipient submitting signature.")
+                    return True
+
+                elif func_obj.fn_name == "claimDisputeSlash":
+                    recipient = func_args["recipient"]
+                    channel_id = Web3.solidity_keccak(["address", "address"], [sender, recipient]).hex()
+
+                    print(f"\n[SANDBOX NODE] Tx Mined: claimDisputeSlash")
+                    print(f"  Sender:    {sender}")
+                    print(f"  Recipient: {recipient}")
+
+                    channel = SandboxState.channels.get(channel_id)
+                    dispute = SandboxState.disputes.get(channel_id)
+                    if not channel or not dispute or not dispute["active"]:
+                        print("  [ERROR] No active channel or dispute found!")
+                        return False
+
+                    current_time = int(time.time()) + SandboxState.time_offset
+                    if current_time < dispute["expiry"]:
+                        print(f"  [ERROR] Dispute challenge window still active (expiry {dispute['expiry']}, current {current_time})!")
+                        return False
+
+                    refund_amount = channel["deposit"]
+                    del SandboxState.channels[channel_id]
+                    del SandboxState.disputes[channel_id]
+
+                    # Perform slash: 0.05 ETH (50000000000000000 Wei)
+                    slash_amount = 50000000000000000
+                    recipient_lower = recipient.lower()
+                    if SandboxState.stakes.get(recipient_lower, 0) >= slash_amount:
+                        SandboxState.stakes[recipient_lower] -= slash_amount
+                        print(f"  [SUCCESS] Slashed 0.05 ETH from {recipient_lower} registry stake. Refunded {refund_amount} Wei to {sender}.")
+                    else:
+                        print(f"  [WARNING] Registry stake for {recipient_lower} is insufficient ({SandboxState.stakes.get(recipient_lower, 0)} Wei). Slashed remaining.")
+                        SandboxState.stakes[recipient_lower] = 0
+
+                    return True
 
             print(f"\n[SANDBOX NODE] Unknown transaction to target {to}")
             return False
@@ -374,6 +617,12 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                 )
                 return "0x" + encoded.hex()
 
+            elif func_obj.fn_name == "stakes":
+                agent_addr = func_args["agent"].lower() if "agent" in func_args else list(func_args.values())[0].lower()
+                staked = SandboxState.stakes.get(agent_addr, 0)
+                encoded = eth_abi.encode(["uint256"], [staked])
+                return "0x" + encoded.hex()
+
         # 2. Payment Channel Contract Reads
         elif to == DEFAULT_CHANNEL_ADDRESS.lower():
             contract = w3.eth.contract(address=DEFAULT_CHANNEL_ADDRESS, abi=CHANNEL_ABI)
@@ -398,6 +647,20 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                 encoded = eth_abi.encode(
                     ["uint256", "uint256", "bool"],
                     [channel["deposit"], channel["challengeExpiry"], channel["challenged"]]
+                )
+                return "0x" + encoded.hex()
+
+            elif func_obj.fn_name == "disputes":
+                channel_id = func_args["channelId"].hex()
+                dispute = SandboxState.disputes.get(channel_id, {
+                    "taskHash": b"\x00" * 32,
+                    "expiry": 0,
+                    "active": False
+                })
+
+                encoded = eth_abi.encode(
+                    ["bytes32", "uint256", "bool"],
+                    [dispute["taskHash"], dispute["expiry"], dispute["active"]]
                 )
                 return "0x" + encoded.hex()
 

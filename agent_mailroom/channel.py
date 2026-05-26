@@ -68,6 +68,49 @@ CHANNEL_ABI = [
         ],
         "stateMutability": "view",
         "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "recipient", "type": "address"},
+            {"internalType": "bytes32", "name": "taskHash", "type": "bytes32"}
+        ],
+        "name": "initiateDispute",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "sender", "type": "address"},
+            {"internalType": "bytes32", "name": "taskHash", "type": "bytes32"},
+            {"internalType": "bytes", "name": "signature", "type": "bytes"}
+        ],
+        "name": "resolveDispute",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "recipient", "type": "address"}
+        ],
+        "name": "claimDisputeSlash",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "channelId", "type": "bytes32"}
+        ],
+        "name": "disputes",
+        "outputs": [
+            {"internalType": "bytes32", "name": "taskHash", "type": "bytes32"},
+            {"internalType": "uint256", "name": "expiry", "type": "uint256"},
+            {"internalType": "bool", "name": "active", "type": "bool"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
     }
 ]
 
@@ -269,3 +312,87 @@ class PaymentChannelManager:
         signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=sender_private_key)
         tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
         return "0x" + tx_hash.hex()
+
+    def initiate_dispute(self, sender_private_key: str, recipient_address: str, task_hash: bytes) -> str:
+        """
+        Alice (sender) opens a dispute for a task to freeze Bob's claim.
+        """
+        account = self.w3.eth.account.from_key(sender_private_key)
+        recipient_checksum = Web3.to_checksum_address(recipient_address)
+
+        nonce = self.w3.eth.get_transaction_count(account.address)
+        tx = self.contract.functions.initiateDispute(
+            recipient_checksum,
+            task_hash
+        ).build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": 150000,
+            "gasPrice": self.w3.eth.gas_price,
+            "chainId": self.w3.eth.chain_id
+        })
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=sender_private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return "0x" + tx_hash.hex()
+
+    def resolve_dispute(self, recipient_private_key: str, sender_address: str, task_hash: bytes, signature: str) -> str:
+        """
+        Bob (recipient) resolves the dispute by submitting Alice's signed resolution.
+        """
+        account = self.w3.eth.account.from_key(recipient_private_key)
+        sender_checksum = Web3.to_checksum_address(sender_address)
+
+        nonce = self.w3.eth.get_transaction_count(account.address)
+        tx = self.contract.functions.resolveDispute(
+            sender_checksum,
+            task_hash,
+            bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
+        ).build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": 200000,
+            "gasPrice": self.w3.eth.gas_price,
+            "chainId": self.w3.eth.chain_id
+        })
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=recipient_private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return "0x" + tx_hash.hex()
+
+    def claim_dispute_slash(self, sender_private_key: str, recipient_address: str) -> str:
+        """
+        Alice claims a channel refund and slashes Bob's registry stake after expiry.
+        """
+        account = self.w3.eth.account.from_key(sender_private_key)
+        recipient_checksum = Web3.to_checksum_address(recipient_address)
+
+        nonce = self.w3.eth.get_transaction_count(account.address)
+        tx = self.contract.functions.claimDisputeSlash(
+            recipient_checksum
+        ).build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": 250000,
+            "gasPrice": self.w3.eth.gas_price,
+            "chainId": self.w3.eth.chain_id
+        })
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=sender_private_key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return "0x" + tx_hash.hex()
+
+    def get_dispute_info(self, sender: str, recipient: str) -> Tuple[bytes, int, bool]:
+        """
+        Queries the blockchain for details of an active dispute on a channel.
+        
+        Returns:
+            Tuple[bytes, int, bool]: (task_hash_bytes, expiry_timestamp, is_active)
+        """
+        sender_checksum = Web3.to_checksum_address(sender)
+        recipient_checksum = Web3.to_checksum_address(recipient)
+        
+        channel_id = self.contract.functions.getChannelId(sender_checksum, recipient_checksum).call()
+        task_hash, expiry, active = self.contract.functions.disputes(channel_id).call()
+        
+        return task_hash, expiry, active
