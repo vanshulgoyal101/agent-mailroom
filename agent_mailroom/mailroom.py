@@ -35,7 +35,8 @@ class AgentMailroom:
         self.auth = AgentAuth()
 
         # Counter for outgoing request nonces
-        self._next_nonce = 0
+        import time
+        self._next_nonce = int(time.time() * 1_000_000)
 
     def register_on_chain(
         self, 

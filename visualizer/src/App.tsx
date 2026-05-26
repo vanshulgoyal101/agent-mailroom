@@ -37,7 +37,8 @@ function App() {
   const [data, setData] = useState<StatePayload | null>(null)
   const [offline, setOffline] = useState(true)
   const [isTriggering, setIsTriggering] = useState(false)
-  const terminalEndRef = useRef<HTMLDivElement | null>(null)
+  const terminalContainerRef = useRef<HTMLDivElement | null>(null)
+  const prevLogsLengthRef = useRef<number>(0)
 
   // Map agent addresses to coordinates, names and styles
   const layout: Record<string, { x: number; y: number; name: string; role: string; color: string }> = {
@@ -93,9 +94,15 @@ function App() {
     return () => clearInterval(timer)
   }, [])
 
-  // Auto-scroll console logs
+  // Auto-scroll console logs inside the terminal container only
   useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const currentLength = data?.logs?.length || 0
+    if (currentLength !== prevLogsLengthRef.current) {
+      prevLogsLengthRef.current = currentLength
+      if (terminalContainerRef.current) {
+        terminalContainerRef.current.scrollTop = terminalContainerRef.current.scrollHeight
+      }
+    }
   }, [data?.logs])
 
   const handleTriggerSwarm = async () => {
@@ -410,16 +417,19 @@ function App() {
                 <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>shell-mode / raw</span>
               </div>
               
-              <div style={{
-                height: '240px',
-                background: '#07080c',
-                borderRadius: '12px',
-                padding: '16px',
-                fontFamily: 'var(--font-mono)',
-                fontSize: '0.8rem',
-                overflowY: 'auto',
-                border: '1px solid rgba(255,255,255,0.03)'
-              }}>
+              <div 
+                ref={terminalContainerRef}
+                style={{
+                  height: '240px',
+                  background: '#07080c',
+                  borderRadius: '12px',
+                  padding: '16px',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '0.8rem',
+                  overflowY: 'auto',
+                  border: '1px solid rgba(255,255,255,0.03)'
+                }}
+              >
                 {data?.logs.length === 0 ? (
                   <div style={{ color: 'var(--text-dim)', textAlign: 'center', paddingTop: '80px' }}>
                     &gt; Console idle. Trigger swarm flow to stream logs...
@@ -431,7 +441,6 @@ function App() {
                     </div>
                   ))
                 )}
-                <div ref={terminalEndRef} />
               </div>
             </div>
 

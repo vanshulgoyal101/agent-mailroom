@@ -300,7 +300,9 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                 contract = w3.eth.contract(address=DEFAULT_REGISTRY_ADDRESS, abi=REGISTRY_ABI)
                 func_obj, func_args = contract.decode_function_input(data)
                 
-                agent_addr = func_args["agent"].lower()
+                agent_addr = func_args.get("agent")
+                if agent_addr:
+                    agent_addr = agent_addr.lower()
 
                 if func_obj.fn_name == "registerAgent":
                     print(f"\n[SANDBOX NODE] Tx Mined: registerAgent")
