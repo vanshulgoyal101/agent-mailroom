@@ -27,6 +27,7 @@ from .channel import (
     DEFAULT_CHANNEL_ADDRESS,
 )
 from .mailroom import AgentMailroom
+from .server import create_agent_app
 
 __all__ = [
     "AgentProfile",
@@ -45,4 +46,5 @@ __all__ = [
     "PaymentChannelManager",
     "DEFAULT_CHANNEL_ADDRESS",
     "AgentMailroom",
+    "create_agent_app",
 ]
