@@ -25,7 +25,6 @@ def test_server_status_quote_and_execute(w3):
     # 2. Register both agents on-chain (in the sandbox simulator)
     alice_mailroom.register_on_chain(
         owner_private_key=CLIENT_KEY,
-        agent_address=alice_mailroom.agent_address,
         endpoint="http://127.0.0.1:8001",
         capabilities=["requester"],
         rate_wei=0
@@ -33,7 +32,6 @@ def test_server_status_quote_and_execute(w3):
 
     bob_mailroom.register_on_chain(
         owner_private_key=PROVIDER_KEY,
-        agent_address=bob_mailroom.agent_address,
         endpoint="http://127.0.0.1:8002",
         capabilities=["contract-audit", "transcription"],
         rate_wei=2000  # Default base price
