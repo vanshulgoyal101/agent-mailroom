@@ -14,3 +14,8 @@ ENV/
 
 # OS files
 .DS_Store
+
+# Build and distribution artifacts
+build/
+dist/
+*.egg-info/
