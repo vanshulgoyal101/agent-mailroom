@@ -2,8 +2,9 @@ import json
 import sys
 import os
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import hashlib
+import threading
 from typing import Dict, Any, Tuple
 import rlp
 import eth_abi
@@ -19,6 +20,7 @@ from agent_mailroom.channel import CHANNEL_ABI, DEFAULT_CHANNEL_ADDRESS
 
 class SandboxState:
     """In-memory blockchain storage for Registry and Payment Channels."""
+    lock = threading.Lock()
     # agent_address (lowercase str) -> dict
     registry: Dict[str, Dict[str, Any]] = {}
     
@@ -1171,7 +1173,7 @@ def execute_swarm_in_background():
 
 def run_server(port: int = 8545) -> None:
     server_address = ('127.0.0.1', port)
-    httpd = HTTPServer(server_address, SandboxJSONRPCHandler)
+    httpd = ThreadingHTTPServer(server_address, SandboxJSONRPCHandler)
     print(f"[SANDBOX NODE] Running HTTP JSON-RPC EVM node simulator on http://127.0.0.1:{port}")
     try:
         httpd.serve_forever()

@@ -211,3 +211,24 @@ body {
   border-radius: 9999px;
   transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/* Table styling */
+table th {
+  border-bottom: 2px solid rgba(255, 255, 255, 0.08);
+}
+table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+table tr:hover {
+  background: rgba(255, 255, 255, 0.01);
+}
+
+/* Form controls */
+select, input {
+  outline: none;
+  transition: all 0.2s ease-in-out;
+}
+select:focus, input:focus {
+  border-color: var(--accent-purple) !important;
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.25);
+}
