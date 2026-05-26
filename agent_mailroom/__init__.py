@@ -28,6 +28,7 @@ from .channel import (
 )
 from .mailroom import AgentMailroom
 from .server import create_agent_app
+from .broker import BrokerAgent
 
 __all__ = [
     "AgentProfile",
@@ -47,4 +48,5 @@ __all__ = [
     "DEFAULT_CHANNEL_ADDRESS",
     "AgentMailroom",
     "create_agent_app",
+    "BrokerAgent",
 ]
