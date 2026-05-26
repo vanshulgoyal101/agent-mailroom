@@ -43,29 +43,29 @@ function App() {
   // Map agent addresses to coordinates, names and styles
   const layout: Record<string, { x: number; y: number; name: string; role: string; color: string }> = {
     "0x35da118ee4b6a8301881b4c8b7761025107c64c4": { 
-      x: 100, 
-      y: 200, 
+      x: 70, 
+      y: 170, 
       name: "Alice (Buyer)", 
       role: "Client / Purchaser", 
       color: "var(--accent-cyan)" 
     },
     "0x1752ff3bdd7e3bb40aada7aad612db4b081f83f0": { 
-      x: 350, 
-      y: 200, 
+      x: 230, 
+      y: 170, 
       name: "Broker Agent", 
       role: "Swarm Orchestrator", 
       color: "var(--accent-purple)" 
     },
     "0xd79396dc9b3b10cadfaa601485afd5cd4887c4d1": { 
-      x: 680, 
-      y: 100, 
+      x: 410, 
+      y: 85, 
       name: "Developer Agent", 
       role: "Sub-Agent (Refactor)", 
       color: "var(--accent-green)" 
     },
     "0xda8b38dd735f1cb2368cbe319ec26bc9f03e514c": { 
-      x: 680, 
-      y: 300, 
+      x: 410, 
+      y: 255, 
       name: "Auditor Agent", 
       role: "Sub-Agent (Audit)", 
       color: "var(--accent-orange)" 
@@ -234,7 +234,7 @@ function App() {
               <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Network Node Topology Map</h3>
               
               <div style={{ flexGrow: 1, minHeight: '340px', background: '#07080c', borderRadius: '12px', position: 'relative', border: '1px solid rgba(255,255,255,0.03)' }}>
-                <svg width="100%" height="340">
+                <svg width="100%" height="100%" viewBox="0 0 500 340" style={{ display: 'block' }}>
                   {/* Draw connection lines */}
                   {data && Object.entries(data.channels).map(([cid, chan]) => {
                     const fromNode = layout[chan.sender.toLowerCase()]
