@@ -3,53 +3,68 @@ import sys
 import subprocess
 import time
 import json
+import threading
+import uvicorn
 from web3 import Web3
 from dotenv import load_dotenv
 
-# Ensure we can import modules
+# Ensure we can import modules from agent_mailroom
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from agent_mailroom import (
     AgentMailroom,
+    create_agent_app,
+    TaskSpec,
     build_agent_did,
 )
 
 # Load environment variables
 load_dotenv()
 
-# Test keys and configuration
+# Test configuration
 RPC_URL = os.getenv("ETH_RPC_URL", "http://127.0.0.1:8545")
 
 # Human Owner Keys
 ALICE_OWNER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 BOB_OWNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 
-# Agent Keypairs (Generated internally or loaded here)
-ALICE_AGENT_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690c" # Alice Agent Key (Account 2)
-BOB_AGENT_KEY = "0xabf82f5110266c165e6488bc1103c80ff2570891d4e0e5a8e64e10b42f61a1a7" # Bob Agent Key (Account 3)"
+# Agent Keys (Account 2 and Account 3)
+ALICE_AGENT_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690c"
+BOB_AGENT_KEY = "0xabf82f5110266c165e6488bc1103c80ff2570891d4e0e5a8e64e10b42f61a1a7"
 
 
 def run_demo():
     w3 = Web3(Web3.HTTPProvider(RPC_URL))
     server_proc = None
+    bob_web_server = None
+    bob_thread = None
 
     try:
-        # Step 1: Spin up Sandbox RPC Server in the background
+        # Step 1: Start Sandbox EVM Node on port 8545
         print("[DEMO] Starting local Sandbox RPC Node on port 8545...")
         node_script = os.path.join(os.path.dirname(__file__), "sandbox_node.py")
         server_proc = subprocess.Popen(
             [sys.executable, "-u", node_script, "8545"],
-            stdout=subprocess.stdout if hasattr(subprocess, "stdout") else None,
-            stderr=subprocess.stderr if hasattr(subprocess, "stderr") else None
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
         
-        # Give the server a moment to launch
-        time.sleep(1.5)
-        
-        if server_proc.poll() is not None:
-            raise RuntimeError(f"Failed to start Sandbox Node. Exit code: {server_proc.returncode}.")
+        # Wait for simulator startup
+        import socket
+        start_time = time.time()
+        success = False
+        while time.time() - start_time < 5.0:
+            try:
+                with socket.create_connection(("127.0.0.1", 8545), timeout=0.5):
+                    success = True
+                    break
+            except OSError:
+                time.sleep(0.1)
+                
+        if not success or server_proc.poll() is not None:
+            raise RuntimeError("Failed to start Sandbox Node simulator.")
             
-        print("[DEMO] Sandbox Node is running. Initializing Mailrooms...")
+        print("[DEMO] Sandbox Node is running.")
 
         # Step 2: Initialize Agent Mailrooms
         alice_mailroom = AgentMailroom(ALICE_AGENT_KEY, w3)
@@ -58,135 +73,149 @@ def run_demo():
         print(f"Alice Agent DID: {alice_mailroom.did}")
         print(f"Bob Agent DID:   {bob_mailroom.did}")
 
-        # Step 3: Register Agents in the On-Chain Registry
+        # Step 3: Register Agents in the DID Registry on-chain
         print("\n[DEMO] Registering Agents on-chain...")
-        
-        # Alice Owner registers Alice Agent
-        tx1 = alice_mailroom.register_on_chain(
+        alice_mailroom.register_on_chain(
             owner_private_key=ALICE_OWNER_KEY,
-            endpoint="http://127.0.0.1:8001/alice-mailroom",
-            capabilities=["defi-arbitrage", "rebalancing"],
-            rate_wei=0  # Alice does not charge for requests
+            endpoint="http://127.0.0.1:8001",
+            capabilities=["arbitrage"],
+            rate_wei=0
         )
-        print(f"  Alice Agent Registered: tx_hash={tx1}")
-
-        # Bob Owner registers Bob Agent
-        bob_rate = w3.to_wei(0.01, "ether")  # Bob charges 0.01 ETH per analysis task
-        tx2 = bob_mailroom.register_on_chain(
+        bob_mailroom.register_on_chain(
             owner_private_key=BOB_OWNER_KEY,
-            endpoint="http://127.0.0.1:8002/bob-mailroom",
+            endpoint="http://127.0.0.1:8002",
             capabilities=["contract-audit", "summarization"],
-            rate_wei=bob_rate
+            rate_wei=w3.to_wei(0.01, "ether")  # Base registered rate is 0.01 ETH
         )
-        print(f"  Bob Agent Registered (Charges 0.01 ETH/task): tx_hash={tx2}")
+        print("  [SUCCESS] Agents registered successfully on-chain.")
 
-        # Step 4: Alice resolves Bob's DID profile from the registry
-        print("\n[DEMO] Alice discovering Bob's profile on-chain...")
+        # Step 4: Configure and start Bob's Agent HTTP Server in a background thread
+        print("\n[DEMO] Configuring Bob's dynamic price calculator and task handler...")
+        
+        # Bob charges dynamically: 0.03 ETH for deep audits, 0.01 ETH for others
+        def bob_price_calculator(spec: TaskSpec) -> int:
+            if spec.task_type == "contract-audit" and spec.params.get("depth") == "deep":
+                return w3.to_wei(0.03, "ether")
+            return w3.to_wei(0.01, "ether")
+
+        def bob_task_handler(task_type: str, params: dict) -> dict:
+            print(f"  [Bob Server] Running AST audit scanner on address {params.get('contract_address')}...")
+            return {
+                "audit_status": "completed",
+                "vulnerabilities": [],
+                "details": "0 critical overflows, compiler optimization verified."
+            }
+
+        # Initialize FastAPI app
+        bob_app = create_agent_app(
+            mailroom=bob_mailroom,
+            task_handler=bob_task_handler,
+            price_calculator=bob_price_calculator
+        )
+
+        print("[DEMO] Starting Bob's Agent HTTP Web Server on http://127.0.0.1:8002...")
+        config = uvicorn.Config(bob_app, host="127.0.0.1", port=8002, log_level="warning")
+        bob_web_server = uvicorn.Server(config)
+        bob_thread = threading.Thread(target=bob_web_server.run, daemon=True)
+        bob_thread.start()
+
+        # Wait for Bob's FastAPI server to bind
+        start_time = time.time()
+        success = False
+        while time.time() - start_time < 5.0:
+            try:
+                with socket.create_connection(("127.0.0.1", 8002), timeout=0.5):
+                    success = True
+                    break
+            except OSError:
+                time.sleep(0.1)
+        if not success:
+            raise RuntimeError("Failed to start Bob's FastAPI server.")
+            
+        print("[DEMO] Bob's Web Server is running.")
+
+        # Step 5: Alice discovers Bob's profile on-chain
+        print("\n[DEMO] Alice resolving Bob's DID registry details...")
         bob_profile = alice_mailroom.registry.get_agent_profile(bob_mailroom.did)
-        print(f"  Bob Endpoint:     {bob_profile.endpoint}")
-        print(f"  Bob Capabilities: {bob_profile.model_capabilities}")
-        print(f"  Bob Rate:         {w3.from_wei(bob_profile.rate_per_task_wei, 'ether')} ETH")
+        print(f"  Bob Endpoint resolved: {bob_profile.endpoint}")
+        print(f"  Bob Capabilities:       {bob_profile.model_capabilities}")
 
-        # Step 5: Alice opens a payment channel to Bob
-        print("\n[DEMO] Alice opening state channel to Bob...")
-        deposit_amount = w3.to_wei(0.05, "ether")
-        tx3 = alice_mailroom.channel_manager.open_channel(
-            sender_private_key=ALICE_AGENT_KEY,
-            recipient_address=bob_mailroom.agent_address,
-            amount_wei=deposit_amount
-        )
-        print(f"  Payment Channel Opened: tx_hash={tx3}")
-
-        # Verify balance locked in channel
-        dep, exp, chg = alice_mailroom.channel_manager.get_channel_info(
-            sender=alice_mailroom.agent_address,
-            recipient=bob_mailroom.agent_address
-        )
-        print(f"  Verified Channel Balance: {w3.from_wei(dep, 'ether')} ETH")
-
-        # Step 6: Alice prepares secure task request for Bob with voucher payment
-        print("\n[DEMO] Alice preparing secure payload & signed payment voucher...")
+        # Step 6: Alice sends HTTP request to Bob (Triggers RFQ & state-channel flow)
+        print("\n[DEMO] Alice requesting dynamic quote and executing task over HTTP...")
         task_payload = {
             "task": "contract-audit",
-            "contract_address": "0xdeadbeef10101010101010101010101010101010",
-            "depth": "deep"
+            "params": {
+                "contract_address": "0xdeadbeef33333333333333333333333333333333",
+                "depth": "deep"  # Triggers the 0.03 ETH quote
+            }
         }
-        
-        # Alice signs the request envelope and attaches a 0.01 ETH cumulative voucher
-        envelope, voucher = alice_mailroom.prepare_request(
+
+        # Outgoing HTTP request handles the RFQ negotiation, locks deposit, signs envelope, and posts
+        response = alice_mailroom.send_request_http(
             recipient_did=bob_mailroom.did,
-            payload=task_payload,
-            attach_voucher_amount_wei=bob_profile.rate_per_task_wei
+            recipient_endpoint=bob_profile.endpoint,
+            task_payload=task_payload
         )
 
-        print(f"  Request Signed! Envelope: {json.dumps(envelope, indent=2)[:300]}...")
-        print(f"  Voucher Issued: {json.dumps(voucher, indent=2)}")
+        print(f"\n[DEMO RESULT] Alice received execution response from Bob over HTTP:")
+        print(json.dumps(response, indent=2))
 
-        # Step 7: Bob receives the secure request and processes it
-        print("\n[DEMO] Bob verifying Alice's request envelope and voucher...")
+        # Step 7: Bob settles the payment channel on-chain using the voucher stored in his server state
+        print("\n[DEMO] Bob extracting client voucher from server memory and redeeming on-chain...")
         
-        # Bob executes validation protocol
-        verified_sender_did, parsed_payload, verified_voucher = bob_mailroom.process_incoming_request(
-            envelope_data=envelope,
-            voucher_data=voucher
-        )
+        # Retrieve Bob's voucher for Alice's address
+        alice_addr_lower = alice_mailroom.agent_address.lower()
+        stored_voucher = bob_app.state.verified_vouchers.get(alice_addr_lower)
+        if not stored_voucher:
+            raise RuntimeError("Bob's server state did not save Alice's voucher.")
 
-        print("  [SUCCESS] All checks passed!")
-        print(f"    Authenticated Sender DID: {verified_sender_did}")
-        print(f"    Payload Content matches:  {parsed_payload}")
-        print(f"    Valid Voucher value:      {w3.from_wei(verified_voucher.amount_wei, 'ether')} ETH")
-
-        # Bob processes the mock analysis task
-        print("\n[DEMO] Bob executing task...")
-        print("  [Bob Node] Analyzing contract 0xdeadbeef... running AST audits...")
-        time.sleep(1.0)
-        task_response = {
-            "status": "success",
-            "result": "No critical re-entrancy or overflow vulnerabilities found. Verify compiler version ^0.8.20."
-        }
-        print(f"  Task result: {task_response}")
-
-        # Step 8: Bob redeems the voucher on-chain to withdraw his earnings
-        print("\n[DEMO] Bob settling the payment channel on-chain...")
-        tx4 = bob_mailroom.channel_manager.redeem_voucher_on_chain(
+        print(f"  Voucher amount to redeem: {w3.from_wei(stored_voucher.amount_wei, 'ether')} ETH")
+        
+        tx_settle = bob_mailroom.channel_manager.redeem_voucher_on_chain(
             recipient_private_key=BOB_AGENT_KEY,
             sender_address=alice_mailroom.agent_address,
-            voucher=verified_voucher
+            voucher=stored_voucher
         )
-        print(f"  Redeem Voucher transaction mined: tx_hash={tx4}")
+        print(f"  Voucher settled on-chain: tx_hash={tx_settle}")
 
-        # Step 9: Verify final channel balance (the remaining 0.04 ETH is returned to Alice, channel closed)
-        print("\n[DEMO] Verifying post-settlement channel status...")
-        post_dep, _, _ = bob_mailroom.channel_manager.get_channel_info(
+        # Step 8: Verify final channel deposit (remainder of 0.02 ETH returned to Alice)
+        post_deposit, _, _ = bob_mailroom.channel_manager.get_channel_info(
             sender=alice_mailroom.agent_address,
             recipient=bob_mailroom.agent_address
         )
-        print(f"  Remaining Channel Balance (should be 0 because settled/closed): {post_dep} Wei")
+        print(f"  Remaining Channel Balance (settled and closed): {post_deposit} Wei")
         print("\n====================================================")
-        print("    M2M IDENTITY & PAYMENT PROTOCOL RUN COMPLETED   ")
+        print("     M2M HTTP RFQ NETWORK HANDSHAKE COMPLETED       ")
         print("====================================================")
 
     except Exception as e:
-        print(f"\n[DEMO ERROR] Execution failed: {str(e)}")
+        print(f"\n[DEMO ERROR] Handshake execution failed: {str(e)}")
         import traceback
         traceback.print_exc()
 
     finally:
-        # Step 10: Clean up Sandbox Node
+        # Step 9: Clean up Bob's Web Server
+        if bob_web_server:
+            print("\n[DEMO] Shutting down Bob's HTTP Server...")
+            bob_web_server.should_exit = True
+            if bob_thread:
+                bob_thread.join(timeout=5)
+                print("[DEMO] Bob's server shutdown successfully.")
+
+        # Step 10: Clean up Sandbox EVM Node
         if server_proc:
-            print("\n[DEMO] Cleaning up. Shutting down Sandbox RPC Server...")
+            print("[DEMO] Shutting down Sandbox RPC Server...")
             server_proc.terminate()
             try:
                 server_proc.wait(timeout=5)
                 print("[DEMO] Sandbox RPC Server shutdown successfully.")
             except subprocess.TimeoutExpired:
-                print("[DEMO] Server did not exit in time. Killing process...")
                 server_proc.kill()
                 server_proc.wait()
 
 
 if __name__ == "__main__":
     print("====================================================")
-    print("      AGENTMAILROOM SECURE HANDSHAKE & PAYMENT      ")
+    print("      AGENTMAILROOM HTTP RFQ & EXECUTION DEMO       ")
     print("====================================================")
     run_demo()
