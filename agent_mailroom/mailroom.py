@@ -1,9 +1,10 @@
 import json
 from typing import Dict, Any, Tuple, Optional
+import httpx
 from web3 import Web3
 from eth_account import Account
 from .registry import AgentRegistryClient, AgentProfile, build_agent_did
-from .auth import AgentAuth, AgentRequestEnvelope
+from .auth import AgentAuth, AgentRequestEnvelope, TaskSpec, AgentQuoteEnvelope
 from .channel import PaymentChannelManager, PaymentVoucher
 
 
@@ -153,3 +154,112 @@ class AgentMailroom:
             self.channel_manager.verify_voucher(voucher)
 
         return envelope.sender_did, envelope.payload, voucher
+
+    def request_quote_http(self, recipient_endpoint: str, task_spec: TaskSpec) -> AgentQuoteEnvelope:
+        """
+        Sends an HTTP POST request to another agent's endpoint to request a price quote.
+        
+        Args:
+            recipient_endpoint: The base URL of the service agent (e.g. 'http://127.0.0.1:8002').
+            task_spec: The specification of the task to be quoted.
+            
+        Returns:
+            AgentQuoteEnvelope: The signed price quote returned by the provider.
+        """
+        url = f"{recipient_endpoint.rstrip('/')}/quote"
+        payload = {
+            "spec": task_spec.model_dump(),
+            "client_did": self.did
+        }
+        
+        response = httpx.post(url, json=payload, timeout=10.0)
+        if response.status_code != 200:
+            raise RuntimeError(f"Quote request failed with status {response.status_code}: {response.text}")
+            
+        return AgentQuoteEnvelope.model_validate(response.json())
+
+    def send_request_http(
+        self,
+        recipient_did: str,
+        recipient_endpoint: str,
+        task_payload: Dict[str, Any],
+        payment_required: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Orchestrates the dynamic RFQ and execution handshake over HTTP.
+        
+        Steps:
+        1. If payment is required, sends a request for quote to recipient's server.
+        2. Inspects local channel deposits. If insufficient to cover the quote, funds channel.
+        3. Generates a signed off-chain voucher matching the quote.
+        4. Prepares the signed task envelope.
+        5. Posts the request, quote, and voucher to the execute endpoint.
+        
+        Args:
+            recipient_did: The DID of the service agent.
+            recipient_endpoint: The HTTP address of the service agent.
+            task_payload: Details of the task (e.g. {"task": "audit", "params": {...}}).
+            payment_required: Whether to perform the RFQ payment loop.
+            
+        Returns:
+            Dict[str, Any]: The execution result returned by the service agent.
+        """
+        recipient_address = recipient_did.split(":")[-1]
+        
+        quote_envelope = None
+        voucher_envelope = None
+
+        if payment_required:
+            # 1. RFQ Stage: Request a dynamic price quote
+            task_spec = TaskSpec(
+                task_type=task_payload["task"],
+                params=task_payload.get("params", {})
+            )
+            quote_envelope = self.request_quote_http(recipient_endpoint, task_spec)
+            
+            # 2. Deposit check: Ensure channel is funded for the quote
+            if quote_envelope.price_wei > 0:
+                deposit, _, _ = self.channel_manager.get_channel_info(
+                    sender=self.agent_address,
+                    recipient=recipient_address
+                )
+                
+                if deposit < quote_envelope.price_wei:
+                    # Fund the channel with a safety buffer (max of 0.05 ETH and the required fee)
+                    fund_amount = max(self.w3.to_wei(0.05, "ether"), quote_envelope.price_wei)
+                    print(f"[SDK] Insufficient channel deposit ({Web3.from_wei(deposit, 'ether')} ETH). "
+                          f"Funding channel with {Web3.from_wei(fund_amount, 'ether')} ETH...")
+                    self.channel_manager.open_channel(
+                        sender_private_key=self._private_key,
+                        recipient_address=recipient_address,
+                        amount_wei=fund_amount
+                    )
+
+                # 3. Create the payment voucher for Bob
+                voucher = self.channel_manager.create_voucher(
+                    sender_private_key=self._private_key,
+                    recipient_address=recipient_address,
+                    amount_wei=quote_envelope.price_wei
+                )
+                voucher_envelope = voucher.model_dump()
+
+        # 4. Sign the execution envelope (without attaching voucher directly, as it's sent in HTTP payload)
+        envelope_data, _ = self.prepare_request(
+            recipient_did=recipient_did,
+            payload=task_payload,
+            attach_voucher_amount_wei=0
+        )
+
+        # 5. Send POST request to Bob's execute endpoint
+        url = f"{recipient_endpoint.rstrip('/')}/execute"
+        execute_payload = {
+            "envelope": envelope_data,
+            "quote": quote_envelope.model_dump() if quote_envelope else None,
+            "voucher": voucher_envelope
+        }
+
+        response = httpx.post(url, json=execute_payload, timeout=10.0)
+        if response.status_code != 200:
+            raise RuntimeError(f"Task execution failed with status {response.status_code}: {response.text}")
+
+        return response.json()
