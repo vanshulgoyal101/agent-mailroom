@@ -43,6 +43,10 @@ class SandboxState:
     # Time offset in seconds (for evm_increaseTime / evm_mine)
     time_offset: int = 0
 
+    # Execution logs for UI visualizer
+    logs: list[str] = []
+    is_running_swarm: bool = False
+
 
 class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
 
@@ -52,6 +56,21 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """Handles POST requests carrying JSON-RPC commands from Web3.py."""
+        if self.path == "/api/run-swarm":
+            import threading
+            threading.Thread(target=execute_swarm_in_background, daemon=True).start()
+            
+            response_bytes = json.dumps({"status": "started"}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Headers', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+            self.send_header('Content-Length', str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+            return
+
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         
@@ -112,7 +131,9 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
                 "registry": reg_data,
                 "channels": chan_data,
                 "stakes": SandboxState.stakes,
-                "time_offset": SandboxState.time_offset
+                "time_offset": SandboxState.time_offset,
+                "logs": SandboxState.logs,
+                "is_running_swarm": SandboxState.is_running_swarm
             }
             
             response_bytes = json.dumps(state_payload).encode('utf-8')
@@ -666,6 +687,152 @@ class SandboxJSONRPCHandler(BaseHTTPRequestHandler):
 
         # Fallback return empty bytes
         return "0x"
+
+
+# Globally track if servers are running
+agent_servers_started = False
+servers_dict = {}
+
+def execute_swarm_in_background():
+    global agent_servers_started
+    if SandboxState.is_running_swarm:
+        return
+    
+    SandboxState.is_running_swarm = True
+    SandboxState.logs = []
+    
+    def log(msg: str):
+        print(f"[SWARM LOG] {msg}")
+        SandboxState.logs.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        
+    try:
+        w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
+        
+        # Keys
+        ALICE_OWNER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        ALICE_AGENT_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690c"
+        BROKER_OWNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+        BROKER_AGENT_KEY = "0xabf82f5110266c165e6488bc1103c80ff2570891d4e0e5a8e64e10b42f61a789"
+        DEV_OWNER_KEY = "0x47e1754f7b1d9c2f82195000575d30a8a37c093a1cf552a4e2ef30f81d11a234"
+        DEV_AGENT_KEY = "0x70c72b1a8cd26b840134a6210f0322bf25852891d4e0e5a8e64e10b42f61a789"
+        AUDITOR_OWNER_KEY = "0x8b3a74bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        AUDITOR_AGENT_KEY = "0x80c72b1a8cd26b840134a6210f0322bf25852891d4e0e5a8e64e10b42f61a456"
+
+        from agent_mailroom.mailroom import AgentMailroom
+        from agent_mailroom.server import create_agent_app
+        from agent_mailroom.broker import BrokerAgent
+        import uvicorn
+        import threading
+        
+        log("Initializing Agent Mailrooms...")
+        alice_mailroom = AgentMailroom(ALICE_AGENT_KEY, w3)
+        broker_mailroom = AgentMailroom(BROKER_AGENT_KEY, w3)
+        dev_mailroom = AgentMailroom(DEV_AGENT_KEY, w3)
+        auditor_mailroom = AgentMailroom(AUDITOR_AGENT_KEY, w3)
+
+        # Set payment channel address
+        alice_mailroom.registry.set_payment_channel(ALICE_OWNER_KEY, alice_mailroom.channel_manager.contract_address)
+
+        log("Registering Alice (Buyer) DID profile...")
+        alice_mailroom.register_on_chain(ALICE_OWNER_KEY, "http://127.0.0.1:8001", ["buyer"], 0)
+        
+        log("Registering Broker DID profile...")
+        broker_mailroom.register_on_chain(BROKER_OWNER_KEY, "http://127.0.0.1:8004", ["orchestration"], 0)
+        
+        log("Registering Developer DID profile (Stake: 0.1 ETH, Cost: 0.01 ETH)...")
+        dev_mailroom.register_on_chain(DEV_OWNER_KEY, "http://127.0.0.1:8003", ["refactor"], w3.to_wei(0.01, "ether"))
+        
+        log("Registering Auditor DID profile (Stake: 0.1 ETH, Cost: 0.015 ETH)...")
+        auditor_mailroom.register_on_chain(AUDITOR_OWNER_KEY, "http://127.0.0.1:8002", ["audit"], w3.to_wei(0.015, "ether"))
+
+        if not agent_servers_started:
+            log("Starting sub-agent FastAPI HTTP servers...")
+            
+            # Dev Server (8003)
+            def dev_task_handler(task_type: str, params: dict) -> dict:
+                code = params.get("code", "")
+                return {"code": f"// Developer Refactored Code\nfunction optimized() {{\n  // Done\n}}\n{code}"}
+            dev_app = create_agent_app(dev_mailroom, dev_task_handler)
+            dev_config = uvicorn.Config(dev_app, host="127.0.0.1", port=8003, log_level="warning")
+            servers_dict["dev"] = uvicorn.Server(dev_config)
+            threading.Thread(target=servers_dict["dev"].run, daemon=True).start()
+
+            # Auditor Server (8002)
+            def auditor_task_handler(task_type: str, params: dict) -> dict:
+                code = params.get("code", "")
+                return {"report": f"Security Scan Report:\n- Buffer Overflows: None\n- Re-entrancy check: Safe\n- Lines Scanned: {len(code.splitlines())}"}
+            auditor_app = create_agent_app(auditor_mailroom, auditor_task_handler)
+            auditor_config = uvicorn.Config(auditor_app, host="127.0.0.1", port=8002, log_level="warning")
+            servers_dict["auditor"] = uvicorn.Server(auditor_config)
+            threading.Thread(target=servers_dict["auditor"].run, daemon=True).start()
+
+            # Broker Server (8004)
+            broker_agent = BrokerAgent(
+                w3=w3,
+                private_key=BROKER_AGENT_KEY,
+                developer_did=dev_mailroom.did,
+                auditor_did=auditor_mailroom.did,
+                registry_address=broker_mailroom.registry.contract_address,
+                channel_address=broker_mailroom.channel_manager.contract_address,
+                brokerage_fee_wei=w3.to_wei(0.005, "ether")
+            )
+            broker_app = broker_agent.create_app()
+            broker_config = uvicorn.Config(broker_app, host="127.0.0.1", port=8004, log_level="warning")
+            servers_dict["broker"] = uvicorn.Server(broker_config)
+            threading.Thread(target=servers_dict["broker"].run, daemon=True).start()
+
+            agent_servers_started = True
+            time.sleep(0.5)
+            log("Sub-agent servers started successfully.")
+
+        log("Alice requesting quote for 'refactor-and-audit' from Broker...")
+        broker_profile = alice_mailroom.registry.get_agent_profile(broker_mailroom.did)
+        
+        task_payload = {
+            "task": "refactor-and-audit",
+            "params": {
+                "code": "function start() { return 1; }",
+                "rules": ["gas-optimization"]
+            }
+        }
+        
+        # Outgoing HTTP request handles the RFQ negotiation, locks deposit, signs envelope, and posts
+        log("Executing secure dynamic multi-agent execution...")
+        result = alice_mailroom.send_request_http(
+            recipient_did=broker_mailroom.did,
+            recipient_endpoint=broker_profile.endpoint,
+            task_payload=task_payload
+        )
+        
+        log("Alice received final consolidated output!")
+        log("Developer code refactored successfully.")
+        log("Auditor scan report generated successfully.")
+        
+        log("Executing dynamic on-chain settlements...")
+        # Settle Dev
+        dev_voucher = dev_app.state.verified_vouchers.get(broker_mailroom.agent_address.lower())
+        if dev_voucher:
+            dev_mailroom.channel_manager.redeem_voucher_on_chain(DEV_AGENT_KEY, broker_mailroom.agent_address, dev_voucher)
+            log("Developer settled payment from Broker (0.01 ETH).")
+            
+        # Settle Auditor
+        auditor_voucher = auditor_app.state.verified_vouchers.get(broker_mailroom.agent_address.lower())
+        if auditor_voucher:
+            auditor_mailroom.channel_manager.redeem_voucher_on_chain(AUDITOR_AGENT_KEY, broker_mailroom.agent_address, auditor_voucher)
+            log("Auditor settled payment from Broker (0.015 ETH).")
+            
+        # Settle Broker
+        broker_voucher = broker_app.state.verified_vouchers.get(alice_mailroom.agent_address.lower())
+        if broker_voucher:
+            broker_mailroom.channel_manager.redeem_voucher_on_chain(BROKER_AGENT_KEY, alice_mailroom.agent_address, broker_voucher)
+            log("Broker settled payment from Alice (0.03 ETH).")
+            
+        log("Swarm economy coordination settled successfully.")
+        
+    except Exception as e:
+        log(f"Swarm error: {str(e)}")
+    finally:
+        SandboxState.is_running_swarm = False
 
 
 def run_server(port: int = 8545) -> None:

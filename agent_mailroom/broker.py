@@ -30,7 +30,7 @@ class BrokerAgent:
     ):
         self.w3 = w3
         self.mailroom = AgentMailroom(
-            private_key=private_key,
+            agent_private_key=private_key,
             w3=w3,
             registry_address=registry_address,
             channel_address=channel_address
@@ -55,8 +55,10 @@ class BrokerAgent:
         print(f"[BROKER] Resolving quote for {agent_did} at endpoint: {quote_url}")
         
         payload = {
-            "task_type": task_type,
-            "params": params,
+            "spec": {
+                "task_type": task_type,
+                "params": params
+            },
             "client_did": self.mailroom.did
         }
 
