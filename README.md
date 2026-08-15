@@ -159,3 +159,28 @@ Payment vouchers are cumulative off-chain signature authorizations. For a channe
 * `sandbox_node.py`: Light-weight JSON-RPC EVM simulator. Runs offline without external chain dependencies.
 * `demo.py`: Executable simulation demonstrating M2M communication and settlement.
 * `tests/`: Extensive Pytest suite.
+
+## 5. Testing
+
+Install the dev extras and run the suite:
+
+```bash
+pip install -e ".[dev]"
+pytest                    # full suite (unit + integration)
+pytest -m "not integration"   # fast unit tests only (no local node)
+pytest -m integration         # integration tests (spawn the sandbox node)
+```
+
+The suite is split into two tiers:
+
+* **Unit tests** — pure cryptography and protocol logic (EIP-712 signing/verification,
+  replay protection, timestamp-drift enforcement, tamper detection, quote/RFQ
+  negotiation). These run in well under a second and need no network.
+* **Integration tests** — exercise the on-chain flows (registration, payment
+  channels, disputes, server handshake) against `sandbox_node.py`, a local
+  in-memory JSON-RPC EVM simulator that is started automatically as a fixture.
+
+Tests are auto-tagged: any test depending on the `sandbox_node`/`w3` fixtures is
+marked `integration`, so `-m "not integration"` reliably selects the offline tier.
+If the sandbox node fails to start, its captured stderr is surfaced in the error.
+

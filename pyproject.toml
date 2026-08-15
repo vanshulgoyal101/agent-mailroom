@@ -31,3 +31,12 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agent_mailroom*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: test requires the local sandbox_node JSON-RPC server.",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:websockets.legacy",
+]

@@ -80,3 +80,55 @@ def test_timestamp_drift():
 
     with pytest.raises(ValueError, match="Request timestamp drift too high"):
         auth.verify_request(envelope, expected_recipient_did=RECIPIENT_DID)
+
+
+def test_tampered_payload_fails_verification():
+    """A payload mutated after signing must fail signature verification."""
+    auth = AgentAuth()
+    envelope = auth.sign_request(
+        sender_private_key=SENDER_KEY,
+        recipient_did=RECIPIENT_DID,
+        payload={"amount": 1},
+        nonce=400,
+    )
+
+    # Tamper with the payload without re-signing.
+    envelope.payload = {"amount": 1_000_000}
+
+    with pytest.raises(ValueError, match="Signature verification failed"):
+        auth.verify_request(envelope, expected_recipient_did=RECIPIENT_DID)
+
+
+def test_tampered_signature_fails_recovery():
+    """A corrupted signature must fail signer recovery."""
+    auth = AgentAuth()
+    envelope = auth.sign_request(
+        sender_private_key=SENDER_KEY,
+        recipient_did=RECIPIENT_DID,
+        payload={"x": 1},
+        nonce=401,
+    )
+
+    # Flip a byte in the signature hex.
+    sig = envelope.signature
+    prefix = sig[:2] if sig.startswith("0x") else ""
+    body = sig[len(prefix):]
+    flipped = ("f" if body[0] != "f" else "0") + body[1:]
+    envelope.signature = prefix + flipped
+
+    with pytest.raises(ValueError):
+        auth.verify_request(envelope, expected_recipient_did=RECIPIENT_DID)
+
+
+def test_distinct_nonces_do_not_collide():
+    """Different nonces from the same sender should both verify successfully."""
+    auth = AgentAuth()
+    for nonce in (500, 501, 502):
+        envelope = auth.sign_request(
+            sender_private_key=SENDER_KEY,
+            recipient_did=RECIPIENT_DID,
+            payload={"n": nonce},
+            nonce=nonce,
+        )
+        assert auth.verify_request(envelope, expected_recipient_did=RECIPIENT_DID) == sender_addr
+
